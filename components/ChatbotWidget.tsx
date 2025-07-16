@@ -2,7 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import type { ChangeEvent, KeyboardEvent } from 'react';
 import { FlowiseClient } from 'flowise-sdk';
 import './ChatbotWidget.css';
-
+import Papa from 'papaparse';
+import * as XLSX from 'xlsx';
 
 
 type ChatMessage = {
@@ -25,6 +26,9 @@ export const ChatbotWidget: React.FC<ChatbotWidgetProps> = ({ apiEndpoint, agent
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const initialMessage = 'Hello! I am SVAI, your AI assistant. How can I help you today?';
+  const sessionId = localStorage.getItem('chatSessionId') || crypto.randomUUID();
+  localStorage.setItem('chatSessionId', sessionId);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -43,44 +47,94 @@ export const ChatbotWidget: React.FC<ChatbotWidgetProps> = ({ apiEndpoint, agent
     if (e.key === 'Enter') sendMessage();
   };
 
-  const readFileAsBase64 = (file: File): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.readAsDataURL(file);
-      reader.onload = () => resolve(reader.result as string);
-      reader.onerror = (error) => reject(error);
+  const parseCsv = (text: string): Promise<any[]> => {
+    return new Promise((resolve) => {
+      Papa.parse(text, {
+        header: true,
+        skipEmptyLines: true,
+        complete: (results) => resolve(results.data),
+      });
     });
   };
+
+  const parseExcel = (file: File): Promise<any[]> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const data = new Uint8Array(e.target!.result as ArrayBuffer);
+        const workbook = XLSX.read(data, { type: 'array' });
+        const sheetName = workbook.SheetNames[0];
+        const sheet = workbook.Sheets[sheetName];
+        const json = XLSX.utils.sheet_to_json(sheet);
+        resolve(json);
+      };
+      reader.onerror = reject;
+      reader.readAsArrayBuffer(file);
+    });
+  };
+
+  const recordsToDocString = (fileName: string, records: any[]): string => {
+    let result = `<doc name='${fileName}'>`;
+    records.forEach((record, idx) => {
+      result += `id: ${idx + 1}\\n`;
+      Object.entries(record).forEach(([key, value]) => {
+        result += `${key}: ${value}\\n`;
+      });
+    });
+    result += `</doc>`;
+    return result;
+  };
+
+  useEffect(() => {
+    setMessages([{ role: 'system', content: initialMessage }]);
+  }, []);
 
   const sendMessage = async () => {
     if (!input.trim() && !selectedFile) return;
 
-    let uploads = [];
-    if (selectedFile) {
-      const base64Data = await readFileAsBase64(selectedFile);
-      uploads.push({
-        type: 'file',
-        name: selectedFile.name,
-        data: base64Data,
-        mime: selectedFile.type,
-      });
-    }
-
-    setMessages((prev) => [
-      ...prev,
-      { role: 'user', content: input || selectedFile?.name || '' },
-      { role: 'system', content: '' }, // prepare empty system message
-    ]);
-    setInput('');
-    setSelectedFile(null);
-    setLoading(true);
+    let finalInput = '';
 
     try {
+      if (selectedFile) {
+        let docString = '';
+
+        if (selectedFile.name.endsWith('.csv')) {
+          const text = await selectedFile.text();
+          const records = await parseCsv(text);
+          docString = recordsToDocString(selectedFile.name, records);
+
+        } else if (selectedFile.name.endsWith('.xlsx') || selectedFile.name.endsWith('.xls')) {
+          const records = await parseExcel(selectedFile);
+          docString = recordsToDocString(selectedFile.name, records);
+
+        } else if (selectedFile.name.endsWith('.txt')) {
+          const text = await selectedFile.text();
+          const escapedText = text.replace(/\r?\n/g, '\\n');
+          docString = `<doc name='${selectedFile.name}'>${escapedText}</doc>`;
+        }
+
+        finalInput = docString;
+      }
+
+      const combinedQuestion = finalInput + '\n\n\n' + input;
+      
+
+      setMessages((prev) => [
+        ...prev,
+        { role: 'user', content: input || selectedFile?.name || '' },
+        { role: 'system', content: 'Thinking...' }, 
+      ]);
+      setInput('');
+      setSelectedFile(null);
+      setLoading(true);
+
       const prediction = await flowise.createPrediction({
-        chatflowId: "53cd3f9a-268b-41b1-a95a-cf31e6b88639", // this is the flowId
-        question: input,
+        chatflowId: agentId,
+        question: combinedQuestion,
         streaming: true,
-        uploads: uploads,
+        overrideConfig: {
+          sessionId: sessionId
+        }
       });
 
       for await (const chunk of prediction) {
@@ -90,13 +144,26 @@ export const ChatbotWidget: React.FC<ChatbotWidgetProps> = ({ apiEndpoint, agent
               i === prev.length - 1
                 ? {
                     ...msg,
-                    content: (prev[prev.length - 1]?.content || '') + chunk.data,
+                    content:
+                      prev[prev.length - 1]?.content === 'Thinking...'
+                        ? chunk.data
+                        : (prev[prev.length - 1]?.content || '') + chunk.data,
                   }
                 : msg
             )
           );
+        } else if (chunk.event === 'error' && chunk.data) {
+          console.error('Flowise error:', chunk.data);
+          setMessages((prev) => [
+            ...prev,
+            { role: 'system', content: '⚠️ Error: Please contact suppport.' },
+          ]);
+          setLoading(false);
+          break; // stop processing further
         }
       }
+
+
 
       setLoading(false);
     } catch (err) {
@@ -108,7 +175,6 @@ export const ChatbotWidget: React.FC<ChatbotWidgetProps> = ({ apiEndpoint, agent
       setLoading(false);
     }
   };
-
 
 
   return (
@@ -134,9 +200,16 @@ export const ChatbotWidget: React.FC<ChatbotWidgetProps> = ({ apiEndpoint, agent
                   m.role === 'user' ? 'user' : 'system'
                 }`}
               >
-                <div className="chatbot-message-content">{m.content}</div>
+                <div
+                  className={`chatbot-message-content ${
+                    m.content === 'Thinking...' ? 'chatbot-typing-dots' : ''
+                  }`}
+                >
+                  {m.content === 'Thinking...' ? 'Thinking' : m.content}
+                </div>
               </div>
             ))}
+
             <div ref={messagesEndRef} />
           </div>
 
@@ -157,8 +230,6 @@ export const ChatbotWidget: React.FC<ChatbotWidgetProps> = ({ apiEndpoint, agent
             </div>
           )}
 
-          
-
           <div className="chatbot-input-area">
             <label className="chatbot-attach-button">
               <svg
@@ -172,9 +243,10 @@ export const ChatbotWidget: React.FC<ChatbotWidgetProps> = ({ apiEndpoint, agent
               </svg>
               <input
                 type="file"
-                accept=".csv, .txt, .xlsx, xls"
+                accept=".csv, .txt, .xlsx, .xls"
                 onChange={handleFileSelect}
                 style={{ display: 'none' }}
+                disabled={loading}
               />
             </label>
 
@@ -184,8 +256,9 @@ export const ChatbotWidget: React.FC<ChatbotWidgetProps> = ({ apiEndpoint, agent
               onChange={handleInputChange}
               onKeyDown={handleKeyDown}
               placeholder="Type your question..."
+              disabled={loading}
             />
-            <button onClick={sendMessage} className="chatbot-send-button">
+            <button onClick={sendMessage} className="chatbot-send-button" disabled={loading}>
               ➤
             </button>
           </div>

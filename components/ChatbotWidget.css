@@ -91,23 +91,27 @@
 
 .chatbot-input-area {
   display: flex;
+  align-items: center;
   padding: 10px;
   border-top: 1px solid #ddd;
+  background-color: #1e1e1e;
 }
 
 .chatbot-input {
   flex: 1;
   padding: 10px 12px;
-  border: 1px solid #ccc;
+  border: none;
   border-radius: 20px;
   outline: none;
   font-size: 14px;
+  background-color: #2c2c2c;
+  color: #fff;
 }
 
 .chatbot-send-button {
   margin-left: 8px;
   padding: 10px 16px;
-  background-color: #081838;
+  background-color: #f58a42;
   color: #fff;
   border: none;
   border-radius: 20px;
@@ -151,7 +155,6 @@
   margin-top: 10px;
 }
 
-
 .chatbot-file-preview {
   background-color: #2c2c2c;
   color: #fff;
@@ -162,43 +165,6 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-}
-
-.chatbot-attach-button {
-  cursor: pointer;
-  font-size: 20px;
-  margin-right: 8px;
-  color: #999;
-}
-
-.chatbot-input-area {
-  display: flex;
-  align-items: center;
-  padding: 10px;
-  border-top: 1px solid #ddd;
-  background-color: #1e1e1e; /* dark input bar */
-}
-
-.chatbot-input {
-  flex: 1;
-  padding: 10px 12px;
-  border: none;
-  border-radius: 20px;
-  outline: none;
-  font-size: 14px;
-  background-color: #2c2c2c;
-  color: #fff;
-}
-
-.chatbot-send-button {
-  margin-left: 8px;
-  padding: 10px 16px;
-  background-color: #f58a42;
-  color: #fff;
-  border: none;
-  border-radius: 20px;
-  cursor: pointer;
-  font-size: 14px;
 }
 
 .chatbot-attach-button {
@@ -227,7 +193,7 @@
   margin: 6px 10px 0 10px;
   border-radius: 12px;
   background-color: #2c2c2c;
-  max-width: fit-content;             
+  max-width: fit-content;
   white-space: nowrap;
   overflow: hidden;
 }
@@ -243,5 +209,36 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  flex: 1;                          /* THIS makes it take remaining space */
+  flex: 1;
+}
+
+/* 🛡️ Disable cursor + opacity on disabled inputs/buttons */
+button:disabled,
+input:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+/* ✨ Animated dots for Thinking... */
+.chatbot-typing-dots::after {
+  content: '';
+  display: inline-block;
+  width: 1em;
+  text-align: left;
+  animation: dots 1.2s steps(3, end) infinite;
+}
+
+@keyframes dots {
+  0% {
+    content: '';
+  }
+  33% {
+    content: '.';
+  }
+  66% {
+    content: '..';
+  }
+  100% {
+    content: '...';
+  }
 }
