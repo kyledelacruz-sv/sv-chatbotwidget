@@ -71,24 +71,39 @@ export const ChatbotWidget: React.FC = () => {
     if (!input.trim() && !selectedFile) return;
 
     let finalInput = '';
+
     try {
+      // Prepare file content if selected
       if (selectedFile) {
+        let docString = '';
+
         if (selectedFile.name.endsWith('.csv')) {
           const text = await selectedFile.text();
-          finalInput = recordsToDocString(selectedFile.name, await parseCsv(text));
+          const records = await parseCsv(text);
+          docString = recordsToDocString(selectedFile.name, records);
+
         } else if (selectedFile.name.endsWith('.xlsx') || selectedFile.name.endsWith('.xls')) {
-          finalInput = recordsToDocString(selectedFile.name, await parseExcel(selectedFile));
+          const records = await parseExcel(selectedFile);
+          docString = recordsToDocString(selectedFile.name, records);
+
         } else if (selectedFile.name.endsWith('.txt')) {
-          finalInput = `<doc name='${selectedFile.name}'>${(await selectedFile.text()).replace(/\r?\n/g, '\\n')}</doc>`;
+          const text = await selectedFile.text();
+          const escapedText = text.replace(/\r?\n/g, '\\n');
+          docString = `<doc name='${selectedFile.name}'>${escapedText}</doc>`;
         }
+
+        finalInput = docString;
       }
+
       const combinedQuestion = finalInput + '\n\n\n' + input;
 
+      // Add user message and system placeholder
       setMessages((prev) => [
         ...prev,
         { role: 'user', content: input || selectedFile?.name || '' },
         { role: 'system', content: 'Thinking...' },
       ]);
+
       setInput('');
       setSelectedFile(null);
       setLoading(true);
@@ -103,22 +118,50 @@ export const ChatbotWidget: React.FC = () => {
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
-      let partial = '';
+      let partialContent = '';
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        partial += decoder.decode(value, { stream: true });
-        setMessages((prev) =>
-          prev.map((msg, i) =>
-            i === prev.length - 1 ? { ...msg, content: partial } : msg
-          )
-        );
+
+        const chunk = decoder.decode(value, { stream: true });
+        const lines = chunk.split('\n');
+
+        for (const line of lines) {
+          if (!line.startsWith('data:')) continue;
+
+          const dataStr = line.replace('data:', '').trim();
+          if (dataStr === '[DONE]' || dataStr === '') continue;
+
+          try {
+            const dataObj = JSON.parse(dataStr);
+
+            if (dataObj.event === 'token' && dataObj.data) {
+              partialContent += dataObj.data;
+
+              setMessages((prev) =>
+                prev.map((msg, i) =>
+                  i === prev.length - 1
+                    ? {
+                        ...msg,
+                        content:
+                          prev[prev.length - 1]?.content === 'Thinking...'
+                            ? dataObj.data
+                            : partialContent,
+                      }
+                    : msg
+                )
+              );
+            }
+          } catch (err) {
+            console.warn('Failed to parse SSE line:', line, err);
+          }
+        }
       }
 
       setLoading(false);
     } catch (err) {
-      console.error('Error:', err);
+      console.error('Backend error:', err);
       setMessages((prev) => [
         ...prev,
         { role: 'system', content: '⚠️ Error contacting backend.' },
@@ -126,6 +169,7 @@ export const ChatbotWidget: React.FC = () => {
       setLoading(false);
     }
   };
+
 
   return (
     <div className="chatbot-container">
