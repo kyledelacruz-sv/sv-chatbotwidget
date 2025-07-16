@@ -1,17 +1,25 @@
-import os
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 import httpx
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
+import os
+import sseclient
+import sys
+
+from fastapi import FastAPI, Request
+from fastapi.responses import StreamingResponse
+import aiohttp
+import asyncio
+import sys
 
 # Load environment variables from .env file
 load_dotenv()
 
 # Get configs from environment
-USERNAME = os.getenv("USERNAME")
-PASSWORD = os.getenv("PASSWORD")
+USERNAME = os.getenv("SV_USERNAME")
+PASSWORD = os.getenv("SV_PASSWORD")
 CHATFLOW_ID = os.getenv("CHATFLOW_ID")
 BASE_URL = os.getenv("BASE_URL", "https://app-qa.streamlineverify.net")
 FLOWISE_BASE_URL = os.getenv("FLOWISE_BASE_URL", "http://localhost:3000")
@@ -20,7 +28,7 @@ FLOWISE_BASE_URL = os.getenv("FLOWISE_BASE_URL", "http://localhost:3000")
 APP_URL = f"{BASE_URL}/app"
 LOGIN_FORM_URL = f"{BASE_URL}/ajax_login"
 LOGIN_BEARER_URL = f"{BASE_URL}/api/login"
-CHATFLOW_URL = f"{FLOWISE_BASE_URL}/v2/agentcanvas/{CHATFLOW_ID}"
+CHATFLOW_URL = f"{FLOWISE_BASE_URL}/api/v1/prediction/{CHATFLOW_ID}"
 
 # Initialize FastAPI app
 app = FastAPI()
@@ -40,72 +48,89 @@ auth_data = {"cookies": None, "bearer_token": None}
 # Authenticate to Streamline Verify and get token
 async def authenticate():
     async with httpx.AsyncClient(follow_redirects=True) as client:
-        # Get CSRF token from login page
-        resp = await client.get(APP_URL)
-        soup = BeautifulSoup(resp.text, "html.parser")
-        csrf_token = soup.find("input", {"name": "csrf_token"}).get("value")
+        try:
+            # Step 1: GET /app → get csrf_token
+            resp = await client.get(APP_URL)
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.text, "html.parser")
+            csrf_token_tag = soup.find("input", {"name": "csrf_token"})
+            if not csrf_token_tag:
+                raise Exception("csrf_token input not found on /app page")
+            csrf_token = csrf_token_tag["value"]
 
-        # Submit login form
-        await client.post(
-            LOGIN_FORM_URL,
-            data={
+            # Step 2: POST /ajax_login → form login
+            login_payload = {
                 "username": USERNAME,
                 "password": PASSWORD,
                 "csrf_token": csrf_token,
-                "timezone": "UTC",
-            },
-            headers={"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"},
-        )
+                "timezone": "UTC"
+            }
+            login_headers = {
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "X-Requested-With": "XMLHttpRequest",
+                "Origin": BASE_URL
+            }
+            login_resp = await client.post(
+                LOGIN_FORM_URL,
+                data=login_payload,
+                headers=login_headers
+            )
+            if not login_resp.is_success or "Invalid" in login_resp.text:
+                raise Exception("Form login failed")
 
-        # Get bearer token
-        bearer_resp = await client.post(
-            LOGIN_BEARER_URL, json={"username": USERNAME, "password": PASSWORD}
-        )
-        bearer_resp.raise_for_status()
+            # Step 3: Extract cookies
+            cookies = client.cookies
+            csrf_post_token = cookies.get("csrf_token") or cookies.get("csrf_refresh_token")
+            csrf_access_token = cookies.get("csrf_access_token") or csrf_post_token
+            cookie_header = "; ".join(f"{k}={v}" for k, v in cookies.items())
 
-        # Store cookies and token for later requests
-        auth_data["cookies"] = client.cookies
-        auth_data["bearer_token"] = bearer_resp.json().get("access_token")
+            # Step 4: POST /api/login → get bearer token
+            bearer_resp = await client.post(
+                LOGIN_BEARER_URL,
+                json={"username": USERNAME, "password": PASSWORD},
+                headers={"Content-Type": "application/json"}
+            )
+            bearer_resp.raise_for_status()
+            access_token = bearer_resp.json().get("access_token")
+
+            # Step 5: Store all in auth_data
+            auth_data.update({
+                "csrf_post_token": csrf_post_token,
+                "csrf_access_token": csrf_access_token,
+                "cookie_header": cookie_header,
+                "access_token": access_token
+            })
+
+            print("✅ Authentication complete.")
+            print("auth_data:", auth_data)
+
+        except Exception as e:
+            print(f"❌ Authentication error: {str(e)}")
+            raise HTTPException(status_code=502, detail="Authentication failed")
+
 
 # Main chat endpoint (streams response)
 @app.post("/api/chat")
 async def chat(request: Request):
     body = await request.json()
-    user_question = body.get("question")
+    question = body.get("question")
 
-    if not user_question:
-        raise HTTPException(status_code=400, detail="Missing 'question' in request body")
-
-    # Authenticate if no token
-    if not auth_data["bearer_token"]:
-        await authenticate()
-
-    async with httpx.AsyncClient(cookies=auth_data["cookies"]) as client:
-        try:
-            # Stream POST request to Flowise
-            flowise_resp = await client.stream(
-                "POST",
+    async def event_stream():
+        session_timeout = aiohttp.ClientTimeout(total=None)
+        async with aiohttp.ClientSession(timeout=session_timeout) as session:
+            async with session.post(
                 CHATFLOW_URL,
-                json={"question": user_question},
+                json={"question": question, "streaming": True},
                 headers={
-                    "Authorization": f"Bearer {auth_data['bearer_token']}",
+                    "Accept": "text/event-stream",
+                    "Connection": "keep-alive",
                     "Content-Type": "application/json",
-                },
-                timeout=60,
-            )
+                }
+            ) as resp:
+                async for line in resp.content:
+                    decoded_line = line.decode('utf-8').strip()
+                    if decoded_line != "":
+                        print(f"⬅️ aiohttp line: {decoded_line}", file=sys.stderr)
+                        yield f"{decoded_line}\n\n"
 
-            # Async generator to yield chunks
-            async def stream_response():
-                async for chunk in flowise_resp.aiter_text():
-                    yield chunk
-
-            return StreamingResponse(stream_response(), media_type="text/plain")
-
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 401:
-                # Token expired → re-authenticate and retry once
-                await authenticate()
-                return await chat(request)
-            raise HTTPException(status_code=500, detail="Error contacting Flowise server")
-
-# Note: Run with → uvicorn main:app --host 0.0.0.0 --port 3001 --reload
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
