@@ -7,12 +7,11 @@ from dotenv import load_dotenv
 import os
 import sseclient
 import sys
-
-from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse
 import aiohttp
 import asyncio
-import sys
+
+
+from flowise import Flowise, PredictionData
 
 # Load environment variables from .env file
 load_dotenv()
@@ -23,12 +22,14 @@ PASSWORD = os.getenv("SV_PASSWORD")
 CHATFLOW_ID = os.getenv("CHATFLOW_ID")
 BASE_URL = os.getenv("BASE_URL", "https://app-qa.streamlineverify.net")
 FLOWISE_BASE_URL = os.getenv("FLOWISE_BASE_URL", "http://localhost:3000")
+ENVIRONMENT = os.getenv("ENVIRONMENT")
 
 # Define important URLs
 APP_URL = f"{BASE_URL}/app"
 LOGIN_FORM_URL = f"{BASE_URL}/ajax_login"
 LOGIN_BEARER_URL = f"{BASE_URL}/api/login"
 CHATFLOW_URL = f"{FLOWISE_BASE_URL}/api/v1/prediction/{CHATFLOW_ID}"
+flowise_client = Flowise(base_url=FLOWISE_BASE_URL)
 
 # Initialize FastAPI app
 app = FastAPI()
@@ -114,23 +115,77 @@ async def authenticate():
 async def chat(request: Request):
     body = await request.json()
     question = body.get("question")
+    sessionID = body.get("sessionID")
 
-    async def event_stream():
-        session_timeout = aiohttp.ClientTimeout(total=None)
-        async with aiohttp.ClientSession(timeout=session_timeout) as session:
-            async with session.post(
-                CHATFLOW_URL,
-                json={"question": question, "streaming": True},
-                headers={
-                    "Accept": "text/event-stream",
-                    "Connection": "keep-alive",
-                    "Content-Type": "application/json",
-                }
-            ) as resp:
-                async for line in resp.content:
-                    decoded_line = line.decode('utf-8').strip()
-                    if decoded_line != "":
-                        print(f"⬅️ aiohttp line: {decoded_line}", file=sys.stderr)
-                        yield f"{decoded_line}\n\n"
+    if not question:
+        raise HTTPException(status_code=400, detail="Missing 'question' in request")
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    if not sessionID:
+        raise HTTPException(status_code=400, detail="Missing 'sessionID' in request")
+
+
+    if ENVIRONMENT == "dev":
+        # From in-memory auth_data
+        await authenticate()
+        csrf_access_token = auth_data.get("csrf_access_token")
+        csrf_post_token = auth_data.get("csrf_post_token")
+        access_token = auth_data.get("access_token")
+        cookie_header = auth_data.get("cookie_header")
+    else:
+        # From incoming cookies
+        cookies = request.cookies
+        csrf_access_token = cookies.get("csrf_access_token")
+        csrf_post_token = cookies.get("csrf_post_token")
+        access_token = cookies.get("access_token")
+        cookie_header = request.headers.get("cookie")  # raw cookie header if needed
+
+    # ✅ Check if any missing, re-authenticate (only for dev)
+    if ENVIRONMENT == "dev" and not all([
+        csrf_access_token,
+        csrf_post_token,
+        access_token,
+        cookie_header
+    ]):
+        print("🔑 Dev: Cookies incomplete — running authenticate()...")
+        await authenticate()
+
+        # Re-fetch after authentication
+        csrf_access_token = auth_data.get("csrf_access_token")
+        csrf_post_token = auth_data.get("csrf_post_token")
+        access_token = auth_data.get("access_token")
+        cookie_header = auth_data.get("cookie_header")
+
+
+    #Build prediction data for Flowise
+    prediction_data = PredictionData(
+        chatflowId=CHATFLOW_ID,
+        question=question,
+        streaming=True,
+        overrideConfig={
+            "sessionId": sessionID,
+            "vars": {
+                "csrf_access_token": csrf_access_token or "",
+                "csrf_post_token": csrf_post_token or "",
+                "access_token": access_token or "",
+                "cookie_header": cookie_header or ""
+            }
+        }
+    )
+
+    try:
+        # Get sync generator from Flowise SDK
+        completion_generator = flowise_client.create_prediction(prediction_data)
+
+        # Wrap it into async generator for StreamingResponse
+        async def event_stream():
+            loop = asyncio.get_event_loop()
+            for chunk in completion_generator:
+                event_data = str(chunk)
+                print(f"⬅️ Flowise chunk: {event_data}", file=sys.stderr)
+                yield await loop.run_in_executor(None, lambda: f"data: {event_data}\n\n")
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+    except Exception as e:
+        print(f"❌ Flowise SDK error: {str(e)}", file=sys.stderr)
+        raise HTTPException(status_code=502, detail="Error communicating with Flowise server")

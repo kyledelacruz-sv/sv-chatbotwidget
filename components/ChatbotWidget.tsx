@@ -11,6 +11,7 @@ export const ChatbotWidget: React.FC = () => {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [streamingStarted, setStreamingStarted] = useState(false);
   const sessionId = localStorage.getItem('chatSessionId') || crypto.randomUUID();
   localStorage.setItem('chatSessionId', sessionId);
 
@@ -21,6 +22,13 @@ export const ChatbotWidget: React.FC = () => {
   useEffect(() => {
     setMessages([{ role: 'system', content: 'Hello! I am SVAI, your AI assistant. How can I help you today?' }]);
   }, []);
+  // Simulate setting cookies for dev environment
+  // useEffect(() => {
+  //   document.cookie = "csrf_access_token=abc123; path=/";
+  //   document.cookie = "csrf_post_token=def456; path=/";
+  //   document.cookie = "access_token=ghi789; path=/";
+  //   console.log("✅ Simulated cookies set!");
+  // }, []);
 
   const parseCsv = (text: string): Promise<any[]> =>
     new Promise((resolve) => {
@@ -69,7 +77,10 @@ export const ChatbotWidget: React.FC = () => {
 
   const sendMessage = async () => {
     if (!input.trim() && !selectedFile) return;
-
+    setStreamingStarted(false);
+    setInput('');
+    setSelectedFile(null);
+    setLoading(true);
     let finalInput = '';
 
     try {
@@ -97,11 +108,18 @@ export const ChatbotWidget: React.FC = () => {
 
       const combinedQuestion = finalInput + '\n\n\n' + input;
 
+      const newUserMessages: { role: 'user' | 'system'; content: string }[] = [];
+
+      if (selectedFile) {
+        newUserMessages.push({ role: 'user', content: `🗎 ${selectedFile.name}` });
+      }
+
       // Add user message and system placeholder
       setMessages((prev) => [
         ...prev,
+        ...newUserMessages,
         { role: 'user', content: input || selectedFile?.name || '' },
-        { role: 'system', content: 'Thinking...' },
+        { role: 'system', content: 'One moment. Streamlining.' },
       ]);
 
       setInput('');
@@ -110,8 +128,9 @@ export const ChatbotWidget: React.FC = () => {
 
       const response = await fetch('http://localhost:3001/api/chat', {
         method: 'POST',
+        credentials: 'include', 
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question: combinedQuestion }),
+        body: JSON.stringify({ question: combinedQuestion, sessionID: sessionId }),
       });
 
       if (!response.body) throw new Error('No response body');
@@ -137,18 +156,26 @@ export const ChatbotWidget: React.FC = () => {
             const dataObj = JSON.parse(dataStr);
 
             if (dataObj.event === 'token' && dataObj.data) {
+              if (!streamingStarted) {
+                setStreamingStarted(true);
+                // ✅ Show "Verifying..." immediately
+                setMessages((prev) =>
+                  prev.map((msg, i) =>
+                    i === prev.length - 1
+                      ? { ...msg, content: 'Verifying...' }
+                      : msg
+                  )
+                );
+                // ⏳ Wait ~200ms before showing partial content
+                await new Promise((resolve) => setTimeout(resolve, 500));
+              }
+
               partialContent += dataObj.data;
 
               setMessages((prev) =>
                 prev.map((msg, i) =>
                   i === prev.length - 1
-                    ? {
-                        ...msg,
-                        content:
-                          prev[prev.length - 1]?.content === 'Thinking...'
-                            ? dataObj.data
-                            : partialContent,
-                      }
+                    ? { ...msg, content: partialContent }
                     : msg
                 )
               );
@@ -158,6 +185,7 @@ export const ChatbotWidget: React.FC = () => {
           }
         }
       }
+
 
       setLoading(false);
     } catch (err) {
@@ -170,6 +198,14 @@ export const ChatbotWidget: React.FC = () => {
     }
   };
 
+  const clearChat = () => {
+    setMessages([
+      { role: 'system', content: 'Hello! I am SVAI, your AI assistant. How can I help you today?' },
+    ]);
+
+    const newSessionId = crypto.randomUUID();
+    localStorage.setItem('chatSessionId', newSessionId);
+  };
 
   return (
     <div className="chatbot-container">
@@ -177,14 +213,22 @@ export const ChatbotWidget: React.FC = () => {
         <div className="chatbot-window open">
           <div className="chatbot-header">
             SVAI
-            <button onClick={() => setIsOpen(false)} className="chatbot-minimize-button" title="Minimize">_</button>
+            <div style={{display: 'flex', alignItems: 'center', gap: '8px'}}>
+              <button onClick={clearChat} className="chatbot-clear-button" title="Clear Chat">⟳</button>
+              <button onClick={() => setIsOpen(false)} className="chatbot-minimize-button" title="Minimize">_</button>
+            </div>
           </div>
+
 
           <div className="chatbot-messages">
             {messages.map((m, i) => (
               <div key={i} className={`chatbot-message ${m.role}`}>
                 <div className="chatbot-message-content">
-                  {m.content === 'Thinking...' ? <span className="chatbot-typing-dots">Thinking...</span> : m.content}
+                  {m.content === 'One moment. Streamlining.' || m.content === 'Verifying...' ? (
+                      <span className="chatbot-typing-dots">{m.content}</span>
+                    ) : (
+                      m.content
+                    )}
                 </div>
               </div>
             ))}
