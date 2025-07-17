@@ -145,6 +145,23 @@
   display: flex;
   align-items: center;
   justify-content: center;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.chatbot-toggle-button:hover {
+  transform: scale(1.1);                      /* slightly enlarge */
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4); /* deeper shadow on hover */
+}
+
+.chatbot-toggle-button svg {
+  width: 28px;
+  height: 28px;
+  transition: transform 0.2s ease, stroke-width 0.2s ease;
+}
+
+.chatbot-toggle-button:hover svg {
+  transform: scale(1.1);           /* slightly enlarge icon */
+  stroke-width: 2;                 /* if your SVG uses stroke */
 }
 
 .chatbot-attach-button {
